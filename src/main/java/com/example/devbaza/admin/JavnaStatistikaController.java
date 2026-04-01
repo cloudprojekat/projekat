@@ -35,7 +35,7 @@ public class JavnaStatistikaController {
     @GetMapping("/stats")
     public ResponseEntity<Map<String, Long>> getJavneStats() {
         return ResponseEntity.ok(Map.of(
-                "brojProgramera", programerRepo.countByAktivanTrue(),
+                "brojProgramera", korisnikRepo.countByTip("programer"),
                 "brojFirmi",      korisnikRepo.countByTip("firma")
         ));
     }
