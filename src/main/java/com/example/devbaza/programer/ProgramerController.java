@@ -91,8 +91,18 @@ public class ProgramerController {
                     : Sort.by(sortBy).descending();
             Page<Programer> stranica = programerRepo.findByAktivanTrue(
                     PageRequest.of(page, size, sort));
+
+            // Prijavljeni programer — njegov profil ide na prvo mjesto
+            Long prijavljeniId = (Long) request.getAttribute("korisnikId");
             List<Map<String, Object>> sadrzaj = stranica.getContent().stream()
-                    .map(p -> buildDto(p, null, null, puniPristup))
+                    .sorted((a, b) -> {
+                        boolean aJe = prijavljeniId != null && prijavljeniId.equals(a.getKorisnikId());
+                        boolean bJe = prijavljeniId != null && prijavljeniId.equals(b.getKorisnikId());
+                        if (aJe && !bJe) return -1;
+                        if (!aJe && bJe) return 1;
+                        return 0;
+                    })
+                    .map(p -> buildDto(p, null, null, puniPristup, prijavljeniId))
                     .collect(Collectors.toList());
             return ResponseEntity.ok(buildResponse(sadrzaj, page,
                     stranica.getTotalPages(), stranica.getTotalElements(),
@@ -124,7 +134,7 @@ public class ProgramerController {
                             qF, trazene, nivoF, gradF, nacF,
                             minIskF, maxIskF, minPF, maxPF,
                             cvF, ghF, pozF, engF, dosF, angF);
-                    return buildDto(p, mr.score, mr.poklapanja, puniPristup);
+                    return buildDto(p, mr.score, mr.poklapanja, puniPristup, (Long) request.getAttribute("korisnikId"));
                 })
                 .sorted(Comparator.comparingInt(
                                 (Map<String, Object> d) -> (int) d.getOrDefault("matchScore", 0))
@@ -274,7 +284,7 @@ public class ProgramerController {
         boolean puniPristup = imaPuniPristup(request);
 
         return programerRepo.findById(id).filter(Programer::getAktivan)
-                .map(p -> ResponseEntity.ok(buildDto(p, null, null, puniPristup)))
+                .map(p -> ResponseEntity.ok(buildDto(p, null, null, puniPristup, (Long) request.getAttribute("korisnikId"))))
                 .orElse(ResponseEntity.notFound().build());
     }
 
@@ -285,7 +295,7 @@ public class ProgramerController {
             return ResponseEntity.status(HttpStatus.FORBIDDEN).body(Map.of("greska", "Nemate pristup."));
         // Vlasnik uvek vidi sve svoje podatke
         return programerRepo.findByKorisnikIdAndAktivanTrue(korisnikId)
-                .map(p -> ResponseEntity.ok(buildDto(p, null, null, true)))
+                .map(p -> ResponseEntity.ok(buildDto(p, null, null, true, (Long) request.getAttribute("korisnikId"))))
                 .orElse(ResponseEntity.notFound().build());
     }
 
@@ -506,38 +516,54 @@ public class ProgramerController {
     //  puniPristup = false → neregistrovani/programer → vide samo javne podatke
     // ══════════════════════════════════════════════════════════════════
     private Map<String, Object> buildDto(Programer p, Integer matchScore,
-                                         String poklapanja, boolean puniPristup) {
+                                         String poklapanja, boolean puniPristup,
+                                         Long prijavljeniKorisnikId) {
         Map<String, Object> dto = new LinkedHashMap<>();
 
-        // ── Uvek javni podaci ──
+        // ── Tri nivoa pristupa ──
+        // puniPristup   = firma/admin   → sve vide
+        // jeVlasnik     = sam programer → vidi samo svoj profil potpuno
+        // ostalo        = null za sve privatne podatke
+        boolean jeVlasnik = prijavljeniKorisnikId != null
+                && prijavljeniKorisnikId.equals(p.getKorisnikId());
+
+        // Uvek vidljivo svima
         dto.put("id",           p.getId());
         dto.put("korisnikId",   p.getKorisnikId());
-        dto.put("ime",          p.getIme());
-        dto.put("grad",         p.getGrad());
-        dto.put("iskustvo",     p.getIskustvo());
         dto.put("nivo",         p.getNivo());
         dto.put("nacinRada",    p.getNacinRada());
         dto.put("tehnologije",  p.getTehnologije());
         dto.put("kreiranDatum", p.getKreiranDatum());
         dto.put("brojPregleda", p.getBrojPregleda());
-        dto.put("pozicija",     p.getPozicija());
-        dto.put("engleski",     p.getEngleski());
-        dto.put("dostupnost",   p.getDostupnost());
-        dto.put("angazovanje",  p.getAngazovanje());
-        dto.put("edukacija",    p.getEdukacija());
 
-        // ── Privatni podaci — samo za firme i admina ──
-        if (puniPristup) {
-            dto.put("plata",  p.getPlata());
-            dto.put("cv",     p.getCv());
-            dto.put("github", p.getGithub());
-            dto.put("opis",   p.getOpis());
+        // Vidljivo firmama, adminima i vlasniku
+        if (puniPristup || jeVlasnik) {
+            dto.put("ime",         p.getIme());
+            dto.put("grad",        p.getGrad());
+            dto.put("iskustvo",    p.getIskustvo());
+            dto.put("pozicija",    p.getPozicija());
+            dto.put("engleski",    p.getEngleski());
+            dto.put("dostupnost",  p.getDostupnost());
+            dto.put("angazovanje", p.getAngazovanje());
+            dto.put("edukacija",   p.getEdukacija());
+            dto.put("plata",       p.getPlata());
+            dto.put("cv",          p.getCv());
+            dto.put("github",      p.getGithub());
+            dto.put("opis",        p.getOpis());
         } else {
-            // Eksplicitno null — frontend zna da treba da prikaže "zaključano"
-            dto.put("plata",  null);
-            dto.put("cv",     null);
-            dto.put("github", null);
-            dto.put("opis",   null);
+            // Neregistrovani — sve null osim osnovnih
+            dto.put("ime",         null);
+            dto.put("grad",        null);
+            dto.put("iskustvo",    null);
+            dto.put("pozicija",    null);
+            dto.put("engleski",    null);
+            dto.put("dostupnost",  null);
+            dto.put("angazovanje", null);
+            dto.put("edukacija",   null);
+            dto.put("plata",       null);
+            dto.put("cv",          null);
+            dto.put("github",      null);
+            dto.put("opis",        null);
         }
 
         if (matchScore != null) {
