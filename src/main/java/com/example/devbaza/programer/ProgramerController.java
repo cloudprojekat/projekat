@@ -2,6 +2,7 @@ package com.example.devbaza.programer;
 
 import com.example.devbaza.security.RateLimiterService;
 import jakarta.servlet.http.HttpServletRequest;
+import jakarta.validation.Valid;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.data.domain.*;
 import org.springframework.http.*;
@@ -22,6 +23,13 @@ public class ProgramerController {
     );
 
     private static final int MAX_PROFILA_ZA_FILTER = 1000;
+
+    // ── Pomocna metoda: da li korisnik ima pristup privatnim podacima ──
+    // Samo firme i admini mogu videti platu, CV, GitHub, email
+    private boolean imaPuniPristup(HttpServletRequest request) {
+        String tip = (String) request.getAttribute("korisnikTip");
+        return "firma".equals(tip) || "admin".equals(tip);
+    }
 
     @GetMapping
     public ResponseEntity<?> getSvi(
@@ -50,6 +58,9 @@ public class ProgramerController {
             return ResponseEntity.status(HttpStatus.TOO_MANY_REQUESTS)
                     .body(Map.of("greska", "Previse zahteva. Sacekaj minut."));
         }
+
+        // Provera da li korisnik ima pravo da vidi privatne podatke
+        boolean puniPristup = imaPuniPristup(request);
 
         size = Math.min(size, 50);
 
@@ -81,7 +92,7 @@ public class ProgramerController {
             Page<Programer> stranica = programerRepo.findByAktivanTrue(
                     PageRequest.of(page, size, sort));
             List<Map<String, Object>> sadrzaj = stranica.getContent().stream()
-                    .map(p -> buildDto(p, null, null))
+                    .map(p -> buildDto(p, null, null, puniPristup))
                     .collect(Collectors.toList());
             return ResponseEntity.ok(buildResponse(sadrzaj, page,
                     stranica.getTotalPages(), stranica.getTotalElements(),
@@ -113,7 +124,7 @@ public class ProgramerController {
                             qF, trazene, nivoF, gradF, nacF,
                             minIskF, maxIskF, minPF, maxPF,
                             cvF, ghF, pozF, engF, dosF, angF);
-                    return buildDto(p, mr.score, mr.poklapanja);
+                    return buildDto(p, mr.score, mr.poklapanja, puniPristup);
                 })
                 .sorted(Comparator.comparingInt(
                                 (Map<String, Object> d) -> (int) d.getOrDefault("matchScore", 0))
@@ -259,8 +270,12 @@ public class ProgramerController {
     public ResponseEntity<?> getJedan(@PathVariable Long id, HttpServletRequest request) {
         if (!rateLimiter.dozvoljenaAkcija(getIp(request)))
             return ResponseEntity.status(HttpStatus.TOO_MANY_REQUESTS).build();
+
+        boolean puniPristup = imaPuniPristup(request);
+
         return programerRepo.findById(id).filter(Programer::getAktivan)
-                .map(ResponseEntity::ok).orElse(ResponseEntity.notFound().build());
+                .map(p -> ResponseEntity.ok(buildDto(p, null, null, puniPristup)))
+                .orElse(ResponseEntity.notFound().build());
     }
 
     @GetMapping("/vlasnik/{korisnikId}")
@@ -268,29 +283,67 @@ public class ProgramerController {
         Long tokenId = (Long) request.getAttribute("korisnikId");
         if (tokenId == null || !tokenId.equals(korisnikId))
             return ResponseEntity.status(HttpStatus.FORBIDDEN).body(Map.of("greska", "Nemate pristup."));
+        // Vlasnik uvek vidi sve svoje podatke
         return programerRepo.findByKorisnikIdAndAktivanTrue(korisnikId)
-                .map(ResponseEntity::ok).orElse(ResponseEntity.notFound().build());
+                .map(p -> ResponseEntity.ok(buildDto(p, null, null, true)))
+                .orElse(ResponseEntity.notFound().build());
     }
 
     @PostMapping
-    public ResponseEntity<?> kreiraj(@RequestBody Programer programer, HttpServletRequest request) {
+    public ResponseEntity<?> kreiraj(@Valid @RequestBody Programer programer, HttpServletRequest request) {
         Long korisnikId = (Long) request.getAttribute("korisnikId");
         String tip      = (String) request.getAttribute("korisnikTip");
         if (korisnikId == null) return ResponseEntity.status(HttpStatus.UNAUTHORIZED).build();
         boolean jeAdmin = "admin".equalsIgnoreCase(tip);
         if (!jeAdmin && programerRepo.findByKorisnikIdAndAktivanTrue(korisnikId).isPresent())
             return ResponseEntity.badRequest().body(Map.of("greska", "Vec imate kreiran profil."));
+        // Validacija URL-ova — sprečava maliciozne linkove i viruse
+        String githubGreska = validirajGithubUrl(programer.getGithub());
+        if (githubGreska != null)
+            return ResponseEntity.badRequest().body(Map.of("greska", githubGreska));
+
+        String cvGreska = validirajCvUrl(programer.getCv());
+        if (cvGreska != null)
+            return ResponseEntity.badRequest().body(Map.of("greska", cvGreska));
+
         programer.setKorisnikId(korisnikId);
         programer.setAktivan(true);
         programer.setBrojPregleda(0);
         if (programer.getIskustvo() == null) programer.setIskustvo(0);
         if (programer.getIme()  != null) programer.setIme(sanitize(programer.getIme()));
         if (programer.getOpis() != null) programer.setOpis(sanitize(programer.getOpis()));
+
+        // Sanitizacija enum polja — nepoznate vrijednosti se ignorišu, HTML se uklanja
+        programer.setNivo(sanitizeEnum(programer.getNivo(), "Junior", "Medior", "Senior"));
+        programer.setNacinRada(sanitizeEnum(programer.getNacinRada(),
+                "Remote", "Hibridno", "Kancelarija",
+                "Remote, Hibridno", "Hibridno, Kancelarija", "Remote, Hibridno, Kancelarija"));
+        programer.setEngleski(sanitizeEnum(programer.getEngleski(), "A2", "B1", "B2", "C1", "C2"));
+        programer.setDostupnost(sanitizeEnum(programer.getDostupnost(), "odmah", "15dana", "mesec", "2meseca"));
+        programer.setAngazovanje(sanitizeEnum(programer.getAngazovanje(), "Fulltime", "Parttime", "Freelance", "Praksa"));
+
+        // Sanitizacija slobodnih tekstualnih polja
+        if (programer.getGrad() != null) programer.setGrad(sanitize(programer.getGrad()));
+        if (programer.getPozicija() != null) programer.setPozicija(sanitize(programer.getPozicija()));
+        if (programer.getEdukacija() != null) programer.setEdukacija(sanitize(programer.getEdukacija()));
+        // Sanitizacija svake tehnologije pojedinačno
+        if (programer.getTehnologije() != null) {
+            programer.setTehnologije(
+                    programer.getTehnologije().stream()
+                            .filter(t -> t != null && !t.isBlank())
+                            .map(t -> sanitize(t))
+                            .filter(t -> t != null && !t.isBlank() && t.length() <= 50)
+                            .distinct()
+                            .limit(30)
+                            .collect(java.util.stream.Collectors.toList())
+            );
+        }
+
         return ResponseEntity.status(HttpStatus.CREATED).body(programerRepo.save(programer));
     }
 
     @PutMapping("/{id}")
-    public ResponseEntity<?> izmeni(@PathVariable Long id, @RequestBody Programer izmene,
+    public ResponseEntity<?> izmeni(@PathVariable Long id, @Valid @RequestBody Programer izmene,
                                     HttpServletRequest request) {
         Long korisnikId = (Long) request.getAttribute("korisnikId");
         String tip      = (String) request.getAttribute("korisnikTip");
@@ -300,21 +353,52 @@ public class ProgramerController {
         if (!p.getKorisnikId().equals(korisnikId) && !"admin".equalsIgnoreCase(tip))
             return ResponseEntity.status(HttpStatus.FORBIDDEN)
                     .body(Map.of("greska", "Nemate dozvolu za izmenu ovog profila."));
+        // Validacija URL-ova — sprečava maliciozne linkove i viruse
+        if (izmene.getGithub() != null) {
+            String gr = validirajGithubUrl(izmene.getGithub());
+            if (gr != null) return ResponseEntity.badRequest().body(Map.of("greska", gr));
+        }
+        if (izmene.getCv() != null) {
+            String cr = validirajCvUrl(izmene.getCv());
+            if (cr != null) return ResponseEntity.badRequest().body(Map.of("greska", cr));
+        }
+
         if (izmene.getIme()         != null) p.setIme(sanitize(izmene.getIme()));
         if (izmene.getGrad()        != null) p.setGrad(izmene.getGrad());
         if (izmene.getIskustvo()    != null) p.setIskustvo(izmene.getIskustvo());
         if (izmene.getEdukacija()   != null) p.setEdukacija(izmene.getEdukacija());
         if (izmene.getPlata()       != null) p.setPlata(izmene.getPlata());
-        if (izmene.getNivo()        != null) p.setNivo(izmene.getNivo());
         if (izmene.getGithub()      != null) p.setGithub(izmene.getGithub());
         if (izmene.getCv()          != null) p.setCv(izmene.getCv());
-        if (izmene.getNacinRada()   != null) p.setNacinRada(izmene.getNacinRada());
         if (izmene.getOpis()        != null) p.setOpis(sanitize(izmene.getOpis()));
-        if (izmene.getTehnologije() != null) p.setTehnologije(izmene.getTehnologije());
-        if (izmene.getPozicija()    != null) p.setPozicija(izmene.getPozicija());
-        if (izmene.getEngleski()    != null) p.setEngleski(izmene.getEngleski());
-        if (izmene.getDostupnost()  != null) p.setDostupnost(izmene.getDostupnost());
-        if (izmene.getAngazovanje() != null) p.setAngazovanje(izmene.getAngazovanje());
+        if (izmene.getGrad()        != null) p.setGrad(sanitize(izmene.getGrad()));
+        if (izmene.getPozicija()    != null) p.setPozicija(sanitize(izmene.getPozicija()));
+        if (izmene.getEdukacija()   != null) p.setEdukacija(sanitize(izmene.getEdukacija()));
+        if (izmene.getTehnologije() != null) {
+            p.setTehnologije(
+                    izmene.getTehnologije().stream()
+                            .filter(t -> t != null && !t.isBlank())
+                            .map(t -> sanitize(t))
+                            .filter(t -> t != null && !t.isBlank() && t.length() <= 50)
+                            .distinct()
+                            .limit(30)
+                            .collect(java.util.stream.Collectors.toList())
+            );
+        }
+
+        // Enum polja — sanitizacija i whitelist provjera
+        if (izmene.getNivo()        != null) p.setNivo(sanitizeEnum(izmene.getNivo(),
+                "Junior", "Medior", "Senior"));
+        if (izmene.getNacinRada()   != null) p.setNacinRada(sanitizeEnum(izmene.getNacinRada(),
+                "Remote", "Hibridno", "Kancelarija",
+                "Remote, Hibridno", "Hibridno, Kancelarija", "Remote, Hibridno, Kancelarija"));
+        if (izmene.getEngleski()    != null) p.setEngleski(sanitizeEnum(izmene.getEngleski(),
+                "A2", "B1", "B2", "C1", "C2"));
+        if (izmene.getDostupnost()  != null) p.setDostupnost(sanitizeEnum(izmene.getDostupnost(),
+                "odmah", "15dana", "mesec", "2meseca"));
+        if (izmene.getAngazovanje() != null) p.setAngazovanje(sanitizeEnum(izmene.getAngazovanje(),
+                "Fulltime", "Parttime", "Freelance", "Praksa"));
+
         return ResponseEntity.ok(programerRepo.save(p));
     }
 
@@ -332,18 +416,11 @@ public class ProgramerController {
         return ResponseEntity.ok(Map.of("poruka", "Profil uspesno obrisan."));
     }
 
-    /**
-     * POST /api/programeri/{id}/klik
-     * Inkrementira broj pregleda — preskače ako je pozivalac vlasnik profila.
-     * Vlasnik se identifikuje po korisnikId iz JWT tokena koji se poredi
-     * sa korisnikId na Programer entitetu.
-     */
     @PostMapping("/{id}/klik")
     public ResponseEntity<?> klik(@PathVariable Long id, HttpServletRequest request) {
         if (!rateLimiter.dozvoljenaAkcija(getIp(request)))
             return ResponseEntity.status(HttpStatus.TOO_MANY_REQUESTS).build();
 
-        // Ako je vlasnik profila — ne povećavamo preglede
         Long tokenKorisnikId = (Long) request.getAttribute("korisnikId");
         if (tokenKorisnikId != null) {
             boolean jeVlasnik = programerRepo.findById(id)
@@ -366,12 +443,15 @@ public class ProgramerController {
                     Map<String, Object> stat = new LinkedHashMap<>();
                     stat.put("id",            p.getId());
                     stat.put("ime",           p.getIme());
+                    stat.put("grad",          p.getGrad());
+                    stat.put("nivo",          p.getNivo());
+                    stat.put("iskustvo",      p.getIskustvo());
+                    stat.put("tehnologije",   p.getTehnologije());
                     stat.put("brojPregleda",  p.getBrojPregleda());
                     stat.put("brojSacuvanja", sacuvanja);
-                    stat.put("tehnologije",   p.getTehnologije());
-                    stat.put("nivo",          p.getNivo());
-                    stat.put("grad",          p.getGrad());
+                    stat.put("kreiranDatum",  p.getKreiranDatum());
                     stat.put("pozicija",      p.getPozicija());
+                    // NAMERNO ne vraćamo: plata, CV, GitHub, opis, email
                     return ResponseEntity.ok(stat);
                 }).orElse(ResponseEntity.notFound().build());
     }
@@ -411,6 +491,7 @@ public class ProgramerController {
                         dto.put("zajednicke",   r[8]);
                         double proc = r[9] instanceof Number ? ((Number) r[9]).doubleValue() : 0;
                         dto.put("procenat",     (int) Math.round(proc));
+                        // NAMERNO ne vraćamo: plata, cv, github — slicni prikaz nema potrebu za tim
                         return dto;
                     }).collect(Collectors.toList());
                     return ResponseEntity.ok(rezultat);
@@ -418,20 +499,24 @@ public class ProgramerController {
                 .orElse(ResponseEntity.notFound().build());
     }
 
-    private Map<String, Object> buildDto(Programer p, Integer matchScore, String poklapanja) {
+    // ══════════════════════════════════════════════════════════════════
+    //  DTO BUILDER — centralno mesto za kontrolu vidljivosti podataka
+    //
+    //  puniPristup = true  → firma ili admin → vide platu, CV, GitHub, opis
+    //  puniPristup = false → neregistrovani/programer → vide samo javne podatke
+    // ══════════════════════════════════════════════════════════════════
+    private Map<String, Object> buildDto(Programer p, Integer matchScore,
+                                         String poklapanja, boolean puniPristup) {
         Map<String, Object> dto = new LinkedHashMap<>();
+
+        // ── Uvek javni podaci ──
         dto.put("id",           p.getId());
         dto.put("korisnikId",   p.getKorisnikId());
         dto.put("ime",          p.getIme());
         dto.put("grad",         p.getGrad());
         dto.put("iskustvo",     p.getIskustvo());
-        dto.put("edukacija",    p.getEdukacija());
-        dto.put("plata",        p.getPlata());
         dto.put("nivo",         p.getNivo());
-        dto.put("github",       p.getGithub());
-        dto.put("cv",           p.getCv());
         dto.put("nacinRada",    p.getNacinRada());
-        dto.put("opis",         p.getOpis());
         dto.put("tehnologije",  p.getTehnologije());
         dto.put("kreiranDatum", p.getKreiranDatum());
         dto.put("brojPregleda", p.getBrojPregleda());
@@ -439,7 +524,26 @@ public class ProgramerController {
         dto.put("engleski",     p.getEngleski());
         dto.put("dostupnost",   p.getDostupnost());
         dto.put("angazovanje",  p.getAngazovanje());
-        if (matchScore != null) { dto.put("matchScore", matchScore); dto.put("poklapanja", poklapanja); }
+        dto.put("edukacija",    p.getEdukacija());
+
+        // ── Privatni podaci — samo za firme i admina ──
+        if (puniPristup) {
+            dto.put("plata",  p.getPlata());
+            dto.put("cv",     p.getCv());
+            dto.put("github", p.getGithub());
+            dto.put("opis",   p.getOpis());
+        } else {
+            // Eksplicitno null — frontend zna da treba da prikaže "zaključano"
+            dto.put("plata",  null);
+            dto.put("cv",     null);
+            dto.put("github", null);
+            dto.put("opis",   null);
+        }
+
+        if (matchScore != null) {
+            dto.put("matchScore",  matchScore);
+            dto.put("poklapanja",  poklapanja);
+        }
         return dto;
     }
 
@@ -466,5 +570,71 @@ public class ProgramerController {
     private String sanitize(String input) {
         if (input == null) return null;
         return input.replaceAll("<[^>]*>", "").trim();
+    }
+
+    /**
+     * Validacija URL-a za GitHub i CV linkove.
+     *
+     * Pravila:
+     * - Mora počinjati sa https:// (ne http://, ne javascript:, ne data:)
+     * - Max 500 karaktera
+     * - GitHub mora sadržati github.com
+     * - CV može biti Google Drive, Dropbox, OneDrive, ili direktan PDF link
+     *
+     * Vraća poruku greške ako nije validan, null ako je ok ili prazan.
+     */
+    private String validirajGithubUrl(String url) {
+        if (url == null || url.isBlank()) return null; // prazno je ok
+        url = url.trim();
+        if (url.length() > 500)
+            return "GitHub URL je predugačak (max 500 karaktera).";
+        if (!url.startsWith("https://"))
+            return "GitHub link mora počinjati sa https://.";
+        if (!url.toLowerCase().contains("github.com"))
+            return "GitHub link mora sadržati github.com.";
+        // Blokira javascript: i data: protocol injections koje bi preživjele https provjeru
+        if (url.toLowerCase().contains("javascript:") || url.toLowerCase().contains("data:"))
+            return "GitHub link nije ispravan.";
+        return null;
+    }
+
+    private String validirajCvUrl(String url) {
+        if (url == null || url.isBlank()) return null; // prazno je ok
+        url = url.trim();
+        if (url.length() > 500)
+            return "CV URL je predugačak (max 500 karaktera).";
+        if (!url.startsWith("https://"))
+            return "CV link mora počinjati sa https://.";
+        if (url.toLowerCase().contains("javascript:") || url.toLowerCase().contains("data:"))
+            return "CV link nije ispravan.";
+        // Dozvoljeni domeni za CV: Google Drive, Dropbox, OneDrive, i direktni PDF linkovi
+        String lower = url.toLowerCase();
+        boolean dozvoljenDomen =
+                lower.contains("drive.google.com") ||
+                        lower.contains("docs.google.com") ||
+                        lower.contains("dropbox.com") ||
+                        lower.contains("onedrive.live.com") ||
+                        lower.contains("1drv.ms") ||
+                        lower.contains("sharepoint.com") ||
+                        lower.contains("notion.so") ||
+                        lower.contains("github.com") ||
+                        lower.contains("linkedin.com") ||
+                        lower.endsWith(".pdf");
+        if (!dozvoljenDomen)
+            return "CV link mora biti Google Drive, Dropbox, OneDrive, ili direktan PDF link (https://.../cv.pdf).";
+        return null;
+    }
+
+    /**
+     * Sanitizuje enum polja — uklanja HTML tagove i ograničava na poznate vrijednosti.
+     * Ako vrijednost nije u listi dozvoljenih, vraća null (polje se ignoriše).
+     */
+    private String sanitizeEnum(String input, String... dozvoljene) {
+        if (input == null) return null;
+        String clean = input.replaceAll("<[^>]*>", "").trim();
+        for (String d : dozvoljene) {
+            if (d.equalsIgnoreCase(clean)) return d; // vraća kanonski oblik
+        }
+        return null; // nepoznata vrijednost — ignorišemo
     }
 }

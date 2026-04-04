@@ -17,6 +17,13 @@ public class ItUslugaController {
     @Autowired private ItUslugaRepository uslugaRepo;
     @Autowired private ProgramerRepository programerRepo;
 
+    // ── Pomocna metoda: da li korisnik ima pristup kontakt podacima ──
+    // Samo firme i admini vide kontakt email
+    private boolean imaPuniPristup(HttpServletRequest request) {
+        String tip = (String) request.getAttribute("korisnikTip");
+        return "firma".equals(tip) || "admin".equals(tip);
+    }
+
     // ────────────────────────────────────────────────────────────────
     //  GET /api/usluge
     // ────────────────────────────────────────────────────────────────
@@ -29,7 +36,8 @@ public class ItUslugaController {
             @RequestParam(required = false)      Integer maxCena,
             @RequestParam(defaultValue = "svi")  String  grad,
             @RequestParam(required = false)      String  nacinRada,
-            @RequestParam(defaultValue = "novo") String  sortBy) {
+            @RequestParam(defaultValue = "novo") String  sortBy,
+            HttpServletRequest request) {
 
         size = Math.min(size, 50);
 
@@ -49,8 +57,16 @@ public class ItUslugaController {
         Page<ItUsluga> stranica = uslugaRepo.pretrazi(
                 katParam, qParam, maxCena, gradParam, nacinParam, pageable);
 
+        boolean puniPristup = imaPuniPristup(request);
+
+        // U listi usluga kontaktEmail nikad ne prikazujemo — to je samo na detail stranici
+        List<ItUsluga> sadrzaj = stranica.getContent();
+        if (!puniPristup) {
+            sadrzaj.forEach(u -> u.setKontaktEmail(null));
+        }
+
         Map<String, Object> odgovor = new LinkedHashMap<>();
-        odgovor.put("sadrzaj",         stranica.getContent());
+        odgovor.put("sadrzaj",         sadrzaj);
         odgovor.put("ukupnoElemenata", stranica.getTotalElements());
         odgovor.put("ukupnoStrana",    stranica.getTotalPages());
         odgovor.put("trenutnaStrana",  stranica.getNumber());
@@ -74,8 +90,7 @@ public class ItUslugaController {
     // ────────────────────────────────────────────────────────────────
     //  GET /api/usluge/{id}
     //  Pregled se ne povećava ako je vlasnik usluge taj koji gleda.
-    //  Vlasnik se identifikuje po korisnikId iz JWT tokena koji se
-    //  poredi sa programerId na ItUsluga entitetu.
+    //  kontaktEmail je vidljiv samo firmama i adminima.
     // ────────────────────────────────────────────────────────────────
     @GetMapping("/{id}")
     public ResponseEntity<?> getJedan(@PathVariable Long id, HttpServletRequest request) {
@@ -83,12 +98,23 @@ public class ItUslugaController {
                 .filter(ItUsluga::getAktivan)
                 .map(u -> {
                     Long tokenKorisnikId = (Long) request.getAttribute("korisnikId");
+                    String tokenTip = (String) request.getAttribute("korisnikTip");
+
                     boolean jeVlasnik = tokenKorisnikId != null
                             && tokenKorisnikId.equals(u.getProgramerId());
+
+                    boolean puniPristup = "firma".equals(tokenTip)
+                            || "admin".equals(tokenTip)
+                            || jeVlasnik;
 
                     // Povećavamo preglede samo ako nije vlasnik
                     if (!jeVlasnik) {
                         uslugaRepo.incrementPregleda(id);
+                    }
+
+                    // Sakrijemo kontakt email ako nema pristup
+                    if (!puniPristup) {
+                        u.setKontaktEmail(null);
                     }
 
                     return ResponseEntity.ok(u);
@@ -100,8 +126,19 @@ public class ItUslugaController {
     //  GET /api/usluge/programer/{programerId}
     // ────────────────────────────────────────────────────────────────
     @GetMapping("/programer/{programerId}")
-    public ResponseEntity<List<ItUsluga>> zaProgamera(@PathVariable Long programerId) {
-        return ResponseEntity.ok(uslugaRepo.findByProgramerIdAndAktivanTrue(programerId));
+    public ResponseEntity<List<ItUsluga>> zaProgamera(@PathVariable Long programerId,
+                                                      HttpServletRequest request) {
+        List<ItUsluga> usluge = uslugaRepo.findByProgramerIdAndAktivanTrue(programerId);
+
+        boolean puniPristup = imaPuniPristup(request);
+        Long tokenId = (Long) request.getAttribute("korisnikId");
+        boolean jeVlasnik = tokenId != null && tokenId.equals(programerId);
+
+        if (!puniPristup && !jeVlasnik) {
+            usluge.forEach(u -> u.setKontaktEmail(null));
+        }
+
+        return ResponseEntity.ok(usluge);
     }
 
     // ────────────────────────────────────────────────────────────────
@@ -112,6 +149,11 @@ public class ItUslugaController {
                                      HttpServletRequest request) {
         Long korisnikId = (Long) request.getAttribute("korisnikId");
         if (korisnikId == null) return ResponseEntity.status(HttpStatus.UNAUTHORIZED).build();
+
+        // Validacija URL-ova
+        String portGreska = validirajPortfolioUrl(usluga.getPortfolioLink());
+        if (portGreska != null)
+            return ResponseEntity.badRequest().body(Map.of("greska", portGreska));
 
         usluga.setProgramerId(korisnikId);
         programerRepo.findByKorisnikIdAndAktivanTrue(korisnikId).ifPresent(p ->
@@ -140,6 +182,13 @@ public class ItUslugaController {
         if (!jeVlasnik && !"admin".equals(tip)) {
             return ResponseEntity.status(HttpStatus.FORBIDDEN)
                     .body(Map.of("greska", "Nema dozvole."));
+        }
+
+        // Validacija portfolio URL-a
+        if (izmene.getPortfolioLink() != null) {
+            String portGreska = validirajPortfolioUrl(izmene.getPortfolioLink());
+            if (portGreska != null)
+                return ResponseEntity.badRequest().body(Map.of("greska", portGreska));
         }
 
         if (izmene.getNaziv() != null)         u.setNaziv(izmene.getNaziv());
@@ -178,5 +227,26 @@ public class ItUslugaController {
         u.setAktivan(false);
         uslugaRepo.save(u);
         return ResponseEntity.ok(Map.of("poruka", "Usluga uklonjena."));
+    }
+
+    /**
+     * Validacija portfolio/CV linka za IT usluge.
+     * Mora biti https://, max 500 karaktera.
+     */
+    private String validirajUrl(String url, String naziv) {
+        if (url == null || url.isBlank()) return null;
+        url = url.trim();
+        if (url.length() > 500)
+            return naziv + " link je predugačak (max 500 karaktera).";
+        if (!url.startsWith("https://"))
+            return naziv + " link mora počinjati sa https://.";
+        String lower = url.toLowerCase();
+        if (lower.contains("javascript:") || lower.contains("data:"))
+            return naziv + " link nije ispravan.";
+        return null;
+    }
+
+    private String validirajPortfolioUrl(String url) {
+        return validirajUrl(url, "Portfolio");
     }
 }

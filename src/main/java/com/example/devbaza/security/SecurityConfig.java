@@ -42,6 +42,16 @@ public class SecurityConfig {
                         .xssProtection(xss -> {})
                         .referrerPolicy(ref ->
                                 ref.policy(ReferrerPolicyHeaderWriter.ReferrerPolicy.STRICT_ORIGIN_WHEN_CROSS_ORIGIN))
+                        // Content-Security-Policy — sprečava XSS i data injection napade
+                        .contentSecurityPolicy(csp -> csp.policyDirectives(
+                                "default-src 'self'; " +
+                                        "script-src 'self' 'unsafe-inline' https://cdnjs.cloudflare.com https://fonts.googleapis.com; " +
+                                        "style-src 'self' 'unsafe-inline' https://fonts.googleapis.com https://cdnjs.cloudflare.com; " +
+                                        "font-src 'self' https://fonts.gstatic.com https://cdnjs.cloudflare.com; " +
+                                        "img-src 'self' data: https:; " +
+                                        "connect-src 'self' https://projekat-production.up.railway.app; " +
+                                        "frame-ancestors 'none';"
+                        ))
                 )
                 .authorizeHttpRequests(auth -> auth
                         .requestMatchers("/api/auth/**").permitAll()
@@ -86,9 +96,6 @@ public class SecurityConfig {
                 .map(String::trim)
                 .filter(s -> !s.isEmpty())
                 .collect(Collectors.toList());
-
-        // Dozvoljava "null" origin — za direktno otvaranje HTML fajlova iz browsera (file://)
-        origins.add("null");
 
         config.setAllowedOriginPatterns(origins);
         config.setAllowedMethods(List.of("GET", "POST", "PUT", "DELETE", "OPTIONS", "PATCH"));
