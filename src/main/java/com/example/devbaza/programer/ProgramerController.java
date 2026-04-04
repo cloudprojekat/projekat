@@ -9,6 +9,7 @@ import org.springframework.http.*;
 import org.springframework.web.bind.annotation.*;
 
 import java.util.*;
+import java.util.Optional;
 import java.util.stream.Collectors;
 
 @RestController
@@ -89,19 +90,37 @@ public class ProgramerController {
             Sort sort = "asc".equalsIgnoreCase(sortDir)
                     ? Sort.by(sortBy).ascending()
                     : Sort.by(sortBy).descending();
-            Page<Programer> stranica = programerRepo.findByAktivanTrue(
-                    PageRequest.of(page, size, sort));
 
-            // Prijavljeni programer — njegov profil ide na prvo mjesto
             Long prijavljeniId = (Long) request.getAttribute("korisnikId");
+
+            // Ako je programer prijavljen — izvuci njegov profil posebno i stavi ga prvi na stranicu 0
+            if (prijavljeniId != null && page == 0) {
+                // Nadji vlasnikov profil
+                Optional<Programer> mojProfil = programerRepo.findByKorisnikIdAndAktivanTrue(prijavljeniId);
+
+                // Ucitaj stranicu bez vlasnika
+                Page<Programer> stranica = programerRepo.findByAktivanTrue(PageRequest.of(page, size, sort));
+
+                List<Map<String, Object>> sadrzaj = new java.util.ArrayList<>();
+
+                // Vlasnik ide prvi
+                mojProfil.ifPresent(p -> sadrzaj.add(buildDto(p, null, null, puniPristup, prijavljeniId)));
+
+                // Ostali profili — preskoci vlasnika ako se pojavi u listi
+                stranica.getContent().stream()
+                        .filter(p -> !p.getKorisnikId().equals(prijavljeniId))
+                        .limit(mojProfil.isPresent() ? size - 1 : size)
+                        .map(p -> buildDto(p, null, null, puniPristup, prijavljeniId))
+                        .forEach(sadrzaj::add);
+
+                return ResponseEntity.ok(buildResponse(sadrzaj, page,
+                        stranica.getTotalPages(), stranica.getTotalElements(),
+                        size, stranica.isLast()));
+            }
+
+            // Ostale stranice ili neregistrovani — normalan prikaz
+            Page<Programer> stranica = programerRepo.findByAktivanTrue(PageRequest.of(page, size, sort));
             List<Map<String, Object>> sadrzaj = stranica.getContent().stream()
-                    .sorted((a, b) -> {
-                        boolean aJe = prijavljeniId != null && prijavljeniId.equals(a.getKorisnikId());
-                        boolean bJe = prijavljeniId != null && prijavljeniId.equals(b.getKorisnikId());
-                        if (aJe && !bJe) return -1;
-                        if (!aJe && bJe) return 1;
-                        return 0;
-                    })
                     .map(p -> buildDto(p, null, null, puniPristup, prijavljeniId))
                     .collect(Collectors.toList());
             return ResponseEntity.ok(buildResponse(sadrzaj, page,
