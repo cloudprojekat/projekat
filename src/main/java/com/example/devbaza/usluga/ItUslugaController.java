@@ -62,7 +62,12 @@ public class ItUslugaController {
         // U listi usluga kontaktEmail nikad ne prikazujemo — to je samo na detail stranici
         List<ItUsluga> sadrzaj = stranica.getContent();
         if (!puniPristup) {
-            sadrzaj.forEach(u -> u.setKontaktEmail(null));
+            sadrzaj.forEach(u -> {
+                u.setKontaktEmail(null);
+                u.setOpis(null);
+                u.setCenaOd(null);
+                u.setPortfolioLink(null);
+            });
         }
 
         Map<String, Object> odgovor = new LinkedHashMap<>();
@@ -112,9 +117,12 @@ public class ItUslugaController {
                         uslugaRepo.incrementPregleda(id);
                     }
 
-                    // Sakrijemo kontakt email ako nema pristup
+                    // Sakrivamo privatne podatke ako nema pristup
                     if (!puniPristup) {
                         u.setKontaktEmail(null);
+                        u.setOpis(null);
+                        u.setCenaOd(null);
+                        u.setPortfolioLink(null);
                     }
 
                     return ResponseEntity.ok(u);
@@ -135,7 +143,12 @@ public class ItUslugaController {
         boolean jeVlasnik = tokenId != null && tokenId.equals(programerId);
 
         if (!puniPristup && !jeVlasnik) {
-            usluge.forEach(u -> u.setKontaktEmail(null));
+            usluge.forEach(u -> {
+                u.setKontaktEmail(null);
+                u.setOpis(null);
+                u.setCenaOd(null);
+                u.setPortfolioLink(null);
+            });
         }
 
         return ResponseEntity.ok(usluge);
@@ -148,7 +161,14 @@ public class ItUslugaController {
     public ResponseEntity<?> kreiraj(@Valid @RequestBody ItUsluga usluga,
                                      HttpServletRequest request) {
         Long korisnikId = (Long) request.getAttribute("korisnikId");
+        String korisnikTip = (String) request.getAttribute("korisnikTip");
         if (korisnikId == null) return ResponseEntity.status(HttpStatus.UNAUTHORIZED).build();
+
+        // Samo programeri mogu objavljivati usluge
+        if (!"programer".equals(korisnikTip) && !"admin".equals(korisnikTip)) {
+            return ResponseEntity.status(HttpStatus.FORBIDDEN)
+                    .body(Map.of("greska", "Samo programeri mogu objavljivati IT usluge."));
+        }
 
         // Validacija URL-ova
         String portGreska = validirajPortfolioUrl(usluga.getPortfolioLink());

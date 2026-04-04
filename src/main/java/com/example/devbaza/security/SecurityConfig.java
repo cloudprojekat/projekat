@@ -56,10 +56,13 @@ public class SecurityConfig {
                 .authorizeHttpRequests(auth -> auth
                         .requestMatchers("/api/auth/**").permitAll()
                         .requestMatchers("/api/javno/**").permitAll()
-                        .requestMatchers(HttpMethod.GET,  "/api/programeri").permitAll()
-                        .requestMatchers(HttpMethod.GET,  "/api/programeri/{id}").permitAll()
+                        // GET programeri zahtijeva prijavu — neregistrovani ne vide nista
+                        .requestMatchers(HttpMethod.GET,  "/api/programeri").authenticated()
+                        .requestMatchers(HttpMethod.GET,  "/api/programeri/{id}").authenticated()
                         .requestMatchers(HttpMethod.POST, "/api/programeri/{id}/klik").permitAll()
-                        .requestMatchers(HttpMethod.GET,  "/api/usluge/**").permitAll()
+                        // GET usluge zahtijeva prijavu — neregistrovani ne vide podatke
+                        .requestMatchers(HttpMethod.GET,  "/api/usluge/stats").permitAll()
+                        .requestMatchers(HttpMethod.GET,  "/api/usluge/**").authenticated()
                         .requestMatchers(HttpMethod.GET,  "/api/statistika/**").permitAll()
                         .requestMatchers(HttpMethod.GET,  "/api/spajanja/broj").permitAll()
                         .requestMatchers(HttpMethod.GET,  "/api/spajanja/poslednja").permitAll()
