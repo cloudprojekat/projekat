@@ -105,7 +105,8 @@ public class SecurityConfig {
         config.setAllowedHeaders(List.of(
                 "Authorization", "Content-Type", "Accept", "Origin", "X-Requested-With"
         ));
-        config.setExposedHeaders(List.of("Authorization"));
+        config.setExposedHeaders(List.of("Authorization", "Set-Cookie"));
+        // allowCredentials(true) je obavezno za HttpOnly cookie slanje
         config.setAllowCredentials(true);
         config.setMaxAge(3600L);
 

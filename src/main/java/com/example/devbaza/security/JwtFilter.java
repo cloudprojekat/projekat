@@ -1,5 +1,6 @@
 package com.example.devbaza.security;
 
+import com.example.devbaza.korisnik.AuthController;
 import jakarta.servlet.FilterChain;
 import jakarta.servlet.ServletException;
 import jakarta.servlet.http.HttpServletRequest;
@@ -27,16 +28,21 @@ public class JwtFilter extends OncePerRequestFilter {
                                     FilterChain filterChain)
             throws ServletException, IOException {
 
-        // Uvek čistimo security context na početku requesta
-        // Sprečava potencijalno "context leak" između zahteva
         SecurityContextHolder.clearContext();
 
-        String authHeader = request.getHeader("Authorization");
-        String token      = jwtUtil.izvuciIzHeadera(authHeader);
+        // 1. Pokušaj izvući token iz HttpOnly cookie-a (primarni način)
+        String token = AuthController.izvuciTokenIzCookieja(request);
+
+        // 2. Fallback na Authorization header (za API klijente koji ne koriste browser)
+        if (token == null) {
+            token = jwtUtil.izvuciIzHeadera(request.getHeader("Authorization"));
+        }
 
         if (token != null) {
-            // Provera da li je token istekao — daje bolju poruku grešku
             if (jwtUtil.jeIstekao(token)) {
+                // Obriši cookie ako je istekao
+                response.addHeader("Set-Cookie",
+                        "jwt_token=; Max-Age=0; Path=/; HttpOnly; Secure; SameSite=Strict");
                 response.setStatus(HttpStatus.UNAUTHORIZED.value());
                 response.setContentType("application/json;charset=UTF-8");
                 response.getWriter().write("{\"greska\":\"Token je istekao. Prijavite se ponovo.\"}");
@@ -48,10 +54,7 @@ public class JwtFilter extends OncePerRequestFilter {
                 String korisnikTip   = jwtUtil.getTip(token);
                 String korisnikEmail = jwtUtil.getEmail(token);
 
-                // Validacija da tip nije null — odbrana od malformiranog tokena
                 if (korisnikId != null && korisnikTip != null && korisnikEmail != null) {
-
-                    // Postavljamo atribute na request — dostupni u kontrolerima
                     request.setAttribute("korisnikId",    korisnikId);
                     request.setAttribute("korisnikTip",   korisnikTip);
                     request.setAttribute("korisnikEmail", korisnikEmail);
@@ -65,21 +68,14 @@ public class JwtFilter extends OncePerRequestFilter {
                                     List.of(new SimpleGrantedAuthority(rola))
                             );
 
-                    // Postavljamo autentifikaciju u Spring Security context
                     SecurityContextHolder.getContext().setAuthentication(auth);
                 }
             }
-            // Ako token nije validan (a nije ni istekao) — samo nastavljamo bez autentifikacije
-            // Spring Security će blokirati zaštićene endpoint-e automatski
         }
 
         filterChain.doFilter(request, response);
     }
 
-    /**
-     * Preskaćemo filter za OPTIONS zahteve (CORS preflight)
-     * Ovo ubrzava CORS preflight jer ne treba JWT provera
-     */
     @Override
     protected boolean shouldNotFilter(HttpServletRequest request) {
         return "OPTIONS".equalsIgnoreCase(request.getMethod());

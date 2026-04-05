@@ -2,18 +2,22 @@ package com.example.devbaza.korisnik;
 
 import com.example.devbaza.security.JwtUtil;
 import com.example.devbaza.security.RateLimiterService;
+import jakarta.servlet.http.Cookie;
 import jakarta.servlet.http.HttpServletRequest;
+import jakarta.servlet.http.HttpServletResponse;
 import jakarta.validation.Valid;
 import jakarta.validation.constraints.Email;
 import jakarta.validation.constraints.NotBlank;
 import jakarta.validation.constraints.Pattern;
 import jakarta.validation.constraints.Size;
 import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
 import org.springframework.security.crypto.bcrypt.BCryptPasswordEncoder;
 import org.springframework.web.bind.annotation.*;
 
+import java.util.Arrays;
 import java.util.HashMap;
 import java.util.Map;
 import java.util.Optional;
@@ -26,6 +30,9 @@ public class AuthController {
     @Autowired private BCryptPasswordEncoder passwordEncoder;
     @Autowired private JwtUtil jwtUtil;
     @Autowired private RateLimiterService rateLimiter;
+
+    @Value("${jwt.expiration.days:7}")
+    private int expirationDays;
 
     // ─── DTO klase ───────────────────────────────────────────────────────────
 
@@ -41,7 +48,6 @@ public class AuthController {
     public static class RegisterRequest {
         @NotBlank(message = "Ime je obavezno")
         @Size(min = 2, max = 100, message = "Ime mora biti između 2 i 100 karaktera")
-        // Dozvoljava samo slova, razmake i srpska slova — sprečava HTML/script injection u imenu
         @Pattern(regexp = "^[\\p{L} .'-]+$", message = "Ime sadrži nedozvoljene karaktere")
         public String ime;
 
@@ -62,7 +68,8 @@ public class AuthController {
 
     @PostMapping("/login")
     public ResponseEntity<?> login(@Valid @RequestBody LoginRequest req,
-                                   HttpServletRequest request) {
+                                   HttpServletRequest request,
+                                   HttpServletResponse response) {
         String ip = getClientIp(request);
         if (!rateLimiter.dozvoljenaAuthAkcija(ip)) {
             return ResponseEntity.status(HttpStatus.TOO_MANY_REQUESTS)
@@ -72,8 +79,6 @@ public class AuthController {
         String email = sanitizeEmail(req.email);
         Optional<Korisnik> opt = korisnikRepo.findByEmail(email);
 
-        // Namerno ista poruka greške za pogrešan email I pogrešnu lozinku
-        // Sprečava "user enumeration" napad — napadač ne može da zna da li email postoji
         if (opt.isEmpty() || !passwordEncoder.matches(req.lozinka, opt.get().getLozinka())) {
             return ResponseEntity.status(HttpStatus.UNAUTHORIZED)
                     .body(greska("Pogrešan email ili lozinka."));
@@ -88,21 +93,25 @@ public class AuthController {
 
         String token = jwtUtil.generisiToken(k.getId(), k.getEmail(), k.getTip(), k.getIme());
 
-        return ResponseEntity.ok(buildAuthResponse(token, k));
+        // Postavi token u HttpOnly cookie — JavaScript ne može pročitati
+        postaviJwtCookie(response, token);
+
+        // Vraćamo samo javne podatke — token NE ide u response body
+        return ResponseEntity.ok(buildAuthResponse(k));
     }
 
     // ─── REGISTRACIJA ────────────────────────────────────────────────────────
 
     @PostMapping("/register")
     public ResponseEntity<?> register(@Valid @RequestBody RegisterRequest req,
-                                      HttpServletRequest request) {
+                                      HttpServletRequest request,
+                                      HttpServletResponse response) {
         String ip = getClientIp(request);
         if (!rateLimiter.dozvoljenaAuthAkcija(ip)) {
             return ResponseEntity.status(HttpStatus.TOO_MANY_REQUESTS)
                     .body(greska("Previše pokušaja. Sačekaj minut."));
         }
 
-        // Samo programer i firma — admin se ne može registrovati javno
         if (!req.tip.equals("programer") && !req.tip.equals("firma")) {
             return ResponseEntity.badRequest()
                     .body(greska("Tip mora biti 'programer' ili 'firma'."));
@@ -111,13 +120,10 @@ public class AuthController {
         String email = sanitizeEmail(req.email);
 
         if (korisnikRepo.existsByEmail(email)) {
-            // Namerno vaga poruka — ne otkriva da email postoji
-            // U produkciji razmisli o: uvek vraćaj 201 i pošalji email potvrdu
             return ResponseEntity.badRequest()
                     .body(greska("Registracija nije uspela. Proverite podatke."));
         }
 
-        // Lozinka validacija — proverava kompleksnost
         String lozinkaGreska = validirajLozinku(req.lozinka);
         if (lozinkaGreska != null) {
             return ResponseEntity.badRequest().body(greska(lozinkaGreska));
@@ -135,15 +141,37 @@ public class AuthController {
         String token = jwtUtil.generisiToken(
                 sacuvan.getId(), sacuvan.getEmail(), sacuvan.getTip(), sacuvan.getIme());
 
+        // Postavi token u HttpOnly cookie
+        postaviJwtCookie(response, token);
+
         return ResponseEntity.status(HttpStatus.CREATED)
-                .body(buildAuthResponse(token, sacuvan));
+                .body(buildAuthResponse(sacuvan));
     }
 
-    // ─── VERIFY TOKEN ─────────────────────────────────────────────────────────
+    // ─── LOGOUT ──────────────────────────────────────────────────────────────
+
+    @PostMapping("/logout")
+    public ResponseEntity<?> logout(HttpServletResponse response) {
+        // Obriši cookie postavljanjem max-age na 0
+        Cookie cookie = new Cookie("jwt_token", "");
+        cookie.setHttpOnly(true);
+        cookie.setSecure(true);
+        cookie.setPath("/");
+        cookie.setMaxAge(0);
+        response.addCookie(cookie);
+        return ResponseEntity.ok(Map.of("poruka", "Odjavljen."));
+    }
+
+    // ─── VERIFY TOKEN ────────────────────────────────────────────────────────
 
     @GetMapping("/verify")
-    public ResponseEntity<?> verify(@RequestHeader("Authorization") String authHeader) {
-        String token = jwtUtil.izvuciIzHeadera(authHeader);
+    public ResponseEntity<?> verify(HttpServletRequest request) {
+        // Čita token iz cookie-a ili Authorization headera (za kompatibilnost)
+        String token = izvuciTokenIzCookieja(request);
+        if (token == null) {
+            token = jwtUtil.izvuciIzHeadera(request.getHeader("Authorization"));
+        }
+
         if (token == null || !jwtUtil.jeValidan(token)) {
             return ResponseEntity.status(HttpStatus.UNAUTHORIZED)
                     .body(greska("Token nije validan ili je istekao."));
@@ -153,20 +181,51 @@ public class AuthController {
         info.put("id",  jwtUtil.getId(token));
         info.put("ime", jwtUtil.getIme(token));
         info.put("tip", jwtUtil.getTip(token));
-        // Ne vraćamo token nazad — klijent ga već ima
 
         return ResponseEntity.ok(info);
     }
 
     // ─── HELPER metode ────────────────────────────────────────────────────────
 
-    private Map<String, Object> buildAuthResponse(String token, Korisnik k) {
+    /**
+     * Postavlja JWT token kao HttpOnly, Secure, SameSite=Strict cookie.
+     * HttpOnly = JavaScript ne može pročitati token (zaštita od XSS).
+     * Secure   = šalje se samo preko HTTPS.
+     * SameSite = zaštita od CSRF napada.
+     */
+    private void postaviJwtCookie(HttpServletResponse response, String token) {
+        int maxAge = expirationDays * 24 * 60 * 60;
+
+        // Spring Cookie klasa ne podržava SameSite direktno, koristimo header
+        String cookieValue = String.format(
+                "jwt_token=%s; Max-Age=%d; Path=/; HttpOnly; Secure; SameSite=Strict",
+                token, maxAge
+        );
+        response.addHeader("Set-Cookie", cookieValue);
+    }
+
+    /**
+     * Izvlači JWT token iz cookie-a.
+     */
+    public static String izvuciTokenIzCookieja(HttpServletRequest request) {
+        if (request.getCookies() == null) return null;
+        return Arrays.stream(request.getCookies())
+                .filter(c -> "jwt_token".equals(c.getName()))
+                .map(Cookie::getValue)
+                .findFirst()
+                .orElse(null);
+    }
+
+    /**
+     * Gradi auth response BEZ tokena — token je u HttpOnly cookie-u.
+     * JavaScript ne može pročitati cookie, ali browser ga automatski šalje.
+     */
+    private Map<String, Object> buildAuthResponse(Korisnik k) {
         Map<String, Object> response = new HashMap<>();
-        response.put("token", token);
-        response.put("id",    k.getId());
-        response.put("ime",   k.getIme());
-        response.put("tip",   k.getTip());
-        // NIKAD ne vraćati lozinku ili email ovde osim ako nije neophodno
+        // Token se NE vraća u body — nalazi se u HttpOnly cookie-u
+        response.put("id",  k.getId());
+        response.put("ime", k.getIme());
+        response.put("tip", k.getTip());
         return response;
     }
 
@@ -176,47 +235,29 @@ public class AuthController {
         return m;
     }
 
-    /**
-     * Normalizuje email — lowercase i trim
-     * Sprečava "duplicate email" bug: "Test@mail.com" i "test@mail.com"
-     */
     private String sanitizeEmail(String email) {
         if (email == null) return "";
         return email.toLowerCase().trim();
     }
 
-    /**
-     * Sanitizuje ime — uklanja višestruke razmake i trima
-     */
     private String sanitizeName(String ime) {
         if (ime == null) return "";
         return ime.trim().replaceAll("\\s+", " ");
     }
 
-    /**
-     * Validacija kompleksnosti lozinke
-     * Vraća poruku greške ili null ako je ok
-     */
     private String validirajLozinku(String lozinka) {
         if (lozinka == null || lozinka.length() < 8) {
             return "Lozinka mora imati minimum 8 karaktera.";
         }
-        // Mora imati bar jedno slovo
         if (!lozinka.matches(".*[a-zA-Z].*")) {
             return "Lozinka mora sadržati bar jedno slovo.";
         }
-        // Mora imati bar jedan broj
         if (!lozinka.matches(".*[0-9].*")) {
             return "Lozinka mora sadržati bar jedan broj.";
         }
         return null;
     }
 
-    /**
-     * Izvlači pravi IP — uzima u obzir reverse proxy (Nginx, Cloudflare)
-     * VAŽNO: X-Forwarded-For može biti spoofovan — u produkciji konfiguriši
-     * trusted proxies u Nginx/Cloudflare pa ovo radi ispravno
-     */
     private String getClientIp(HttpServletRequest request) {
         String forwarded = request.getHeader("X-Forwarded-For");
         if (forwarded != null && !forwarded.isBlank()) {
