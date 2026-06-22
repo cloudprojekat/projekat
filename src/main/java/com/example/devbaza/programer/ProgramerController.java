@@ -629,7 +629,7 @@ public class ProgramerController {
      * Vraća poruku greške ako nije validan, null ako je ok ili prazan.
      */
     private String validirajGithubUrl(String url) {
-        if (url == null || url.isBlank()) return null; // prazno je ok
+        if (url == null || url.isBlank()) return null;
         url = url.trim();
         if (url.length() > 500)
             return "GitHub URL je predugačak (max 500 karaktera).";
